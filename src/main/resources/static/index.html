@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <title>Audio Only WebRTC PoC</title>
   <style>
     body { font-family: sans-serif; max-width: 600px; margin: 20px auto; }
@@ -14,7 +15,7 @@
 
 <div>
   <label for="callId">Call ID:</label>
-  <input type="text" id="callId" value="test-call-123">
+  <input type="text" id="callId" value="test-call">
 </div>
 
 <div>
@@ -36,6 +37,13 @@
 </div>
 
 <script>
+  const serverUrl = 'http://localhost:8080';
+  const STUN_SERVER = { 
+        urls: [
+            'stun:stun.l.google.com:19302'
+        ]
+    };
+
   const localAudio = document.getElementById('localAudio');
   const remoteAudio = document.getElementById('remoteAudio');
   const callIdInput = document.getElementById('callId');
@@ -43,10 +51,9 @@
 
   let localStream;
   let peerConnection;
-  let isCaller = false;
-  const serverUrl = 'http://localhost:8080';
-  const iceCandidatesQueue = [];
   let iceInterval;
+  let pollInterval;
+  let currentCallId;
 
   function updateStatus(message) {
       statusDiv.textContent = 'Status: ' + message;
@@ -58,23 +65,21 @@
       try {
           localStream = await navigator.mediaDevices.getUserMedia({
               audio: true,
-              video: false // ВЫКЛЮЧАЕМ ВИДЕО
+              video: false
           });
           localAudio.srcObject = localStream;
           updateStatus('Microphone access granted');
+          return true;
       } catch (err) {
           console.error('Error accessing microphone.', err);
           updateStatus('Error: ' + err.message);
+          return false;
       }
   }
 
   // 2. Создать и настроить PeerConnection (ТОЛЬКО АУДИО)
   function createPeerConnection() {
-      const config = {
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      };
-
-      peerConnection = new RTCPeerConnection(config);
+      peerConnection = new RTCPeerConnection({iceServers: [STUN_SERVER]});
 
       // Добавляем только аудио-трек
       const audioTracks = localStream.getAudioTracks();
@@ -89,136 +94,149 @@
           updateStatus('Connected!');
       };
 
-      // Собираем ICE-кандидаты
+      // Собираем ICE-кандидаты и сразу отправляем
       peerConnection.onicecandidate = (event) => {
           if (event.candidate) {
-              iceCandidatesQueue.push(event.candidate.toJSON());
+              // Отправляем кандидат сразу при получении
+              fetch(`${serverUrl}/api/signal/ice-candidate/${currentCallId}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(event.candidate.toJSON())
+              }).catch(error => {
+                  console.error('Error sending ICE candidate:', error);
+              });
           }
       };
 
       peerConnection.onconnectionstatechange = () => {
-          updateStatus('Connection state: ' + peerConnection.connectionState);
+          const state = peerConnection.connectionState;
+          updateStatus('Connection state: ' + state);
+          
+          if (state === 'connected') {
+              // Останавливаем поллинг при успешном соединении
+              if (pollInterval) clearInterval(pollInterval);
+          } else if (state === 'disconnected' || state === 'failed') {
+              hangUp();
+          }
       };
   }
 
-  // 3. Функция для отправки ICE-кандидатов
-  async function sendIceCandidates(callId) {
-      iceInterval = setInterval(async () => {
-          if (iceCandidatesQueue.length > 0) {
-              const candidate = iceCandidatesQueue.shift();
-              try {
-                  await fetch(`${serverUrl}/api/signal/ice-candidate/${callId}`, {
-                      method: 'POST',
-                      body: JSON.stringify(candidate),
-                      headers: { 'Content-Type': 'application/json' }
-                  });
-              } catch (error) {
-                  console.error('Error sending ICE candidate:', error);
-              }
-          }
-      }, 500);
-  }
-
-  // 4. Функция для получения ICE-кандидатов
-  async function receiveIceCandidates(callId) {
-    const interval = setInterval(async () => {
-        try {
-            const response = await fetch(`${serverUrl}/api/signal/ice-candidates/${callId}`);
-            const candidateData = await response.json();
-
-            try {
-                // Преобразуем полученные данные в объект для addIceCandidate
-                await peerConnection.addIceCandidate(new RTCIceCandidate(candidateData));
-            } catch (error) {
-                console.error('Error adding ICE candidate:', error);
-            }
-
-        } catch (error) {
-            console.error('Error fetching ICE candidates:', error);
-        }
-    }, 1000);
-    return interval; // Возвращаем interval ID для очистки
-  }
-
-  // 5. Инициатор звонка (Caller)
-  async function startCall() {
-      isCaller = true;
-      updateStatus('Starting call...');
-
-      await startAudioStream();
-      createPeerConnection();
-      const callId = callIdInput.value;
-
-      // Создаем и отправляем offer
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-
-      await fetch(`${serverUrl}/api/signal/offer/${callId}`, {
-          method: 'POST',
-          body: offer.sdp,
-          headers: { 'Content-Type': 'text/plain' }
-      });
-
-      updateStatus('Offer sent, waiting for answer...');
-      sendIceCandidates(callId);
-
-      // Ждем answer
-      const answerInterval = setInterval(async () => {
+  // 3. Функция для получения ICE-кандидатов
+  async function pollIceCandidates(callId) {
+      return setInterval(async () => {
           try {
-              const response = await fetch(`${serverUrl}/api/signal/answer/${callId}`);
-              const answerSdp = await response.text();
-
-              if (answerSdp) {
-                  clearInterval(answerInterval);
-                  await peerConnection.setRemoteDescription({
-                      type: 'answer',
-                      sdp: answerSdp
-                  });
-                  updateStatus('Answer received, connecting...');
-                  receiveIceCandidates(callId);
+              const response = await fetch(`${serverUrl}/api/signal/ice-candidates/${callId}`);
+              if (response.ok) {
+                  const candidates = await response.json();
+                  
+                  for (const candidateData of candidates) {
+                      try {
+                          await peerConnection.addIceCandidate(new RTCIceCandidate(candidateData));
+                          console.log('Added ICE candidate');
+                      } catch (error) {
+                          console.warn('Error adding ICE candidate:', error);
+                      }
+                  }
               }
           } catch (error) {
-              console.error('Error checking for answer:', error);
+              console.error('Error fetching ICE candidates:', error);
           }
       }, 1000);
   }
 
-  // 6. Ответчик (Callee)
-  async function answerCall() {
-      isCaller = false;
-      updateStatus('Answering call...');
+  // 4. Инициатор звонка (Caller)
+  async function startCall() {
+      updateStatus('Starting call...');
+      currentCallId = callIdInput.value;
 
-      await startAudioStream();
+      if (!await startAudioStream()) return;
+      
       createPeerConnection();
-      const callId = callIdInput.value;
 
-      sendIceCandidates(callId);
+      // Создаем и отправляем offer
+      try {
+          const offer = await peerConnection.createOffer();
+          await peerConnection.setLocalDescription(offer);
 
-      // Ждем offer
-      const offerInterval = setInterval(async () => {
+          await fetch(`${serverUrl}/api/signal/offer/${currentCallId}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                  type: offer.type,
+                  sdp: offer.sdp
+              })
+          });
+
+          updateStatus('Offer sent, waiting for answer...');
+
+          // Запускаем поллинг для answer и ICE кандидатов
+          pollInterval = setInterval(async () => {
+              try {
+                  // Проверяем answer
+                  const answerResponse = await fetch(`${serverUrl}/api/signal/answer/${currentCallId}`);
+                  if (answerResponse.ok) {
+                      const answerData = await answerResponse.json();
+                      
+                      if (answerData.type && answerData.sdp) {
+                          await peerConnection.setRemoteDescription(new RTCSessionDescription(answerData));
+                          updateStatus('Answer received, connecting...');
+                          clearInterval(pollInterval);
+                          
+                          // Запускаем поллинг ICE кандидатов
+                          pollInterval = await pollIceCandidates(currentCallId);
+                      }
+                  }
+              } catch (error) {
+                  console.error('Error polling:', error);
+              }
+          }, 1000);
+
+      } catch (error) {
+          console.error('Error starting call:', error);
+          updateStatus('Error starting call');
+      }
+  }
+
+  // 5. Ответчик (Callee)
+  async function answerCall() {
+      updateStatus('Answering call...');
+      currentCallId = callIdInput.value;
+
+      if (!await startAudioStream()) return;
+
+      // Сначала ждем offer
+      const offerPollInterval = setInterval(async () => {
           try {
-              const response = await fetch(`${serverUrl}/api/signal/offer/${callId}`);
-              const offerSdp = await response.text();
+              const response = await fetch(`${serverUrl}/api/signal/offer/${currentCallId}`);
+              if (response.ok) {
+                  const offerData = await response.json();
+                  
+                  if (offerData.type && offerData.sdp) {
+                      clearInterval(offerPollInterval);
+                      
+                      createPeerConnection();
+                      
+                      // Устанавливаем полученный offer
+                      await peerConnection.setRemoteDescription(new RTCSessionDescription(offerData));
 
-              if (offerSdp) {
-                  clearInterval(offerInterval);
-                  await peerConnection.setRemoteDescription({
-                      type: 'offer',
-                      sdp: offerSdp
-                  });
+                      // Создаем и отправляем answer
+                      const answer = await peerConnection.createAnswer();
+                      await peerConnection.setLocalDescription(answer);
 
-                  // Создаем и отправляем answer
-                  const answer = await peerConnection.createAnswer();
-                  await peerConnection.setLocalDescription(answer);
+                      await fetch(`${serverUrl}/api/signal/answer/${currentCallId}`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                              type: answer.type,
+                              sdp: answer.sdp
+                          })
+                      });
 
-                  await fetch(`${serverUrl}/api/signal/answer/${callId}`, {
-                      method: 'POST',
-                      body: answer.sdp,
-                      headers: { 'Content-Type': 'text/plain' }
-                  });
-
-                  updateStatus('Call answered!');
-                  receiveIceCandidates(callId);
+                      updateStatus('Call answered!');
+                      
+                      // Запускаем поллинг ICE кандидатов
+                      pollInterval = await pollIceCandidates(currentCallId);
+                  }
               }
           } catch (error) {
               console.error('Error checking for offer:', error);
@@ -226,21 +244,30 @@
       }, 1000);
   }
 
-  // 7. Завершение звонка
+  // 6. Завершение звонка
   function hangUp() {
+      if (pollInterval) {
+          clearInterval(pollInterval);
+      }
       if (peerConnection) {
           peerConnection.close();
           peerConnection = null;
       }
-      if (iceInterval) {
-          clearInterval(iceInterval);
-      }
       if (localStream) {
           localStream.getTracks().forEach(track => track.stop());
+          localStream = null;
       }
+      if (currentCallId) {
+          // Очищаем на сервере
+          fetch(`${serverUrl}/api/signal/cleanup/${currentCallId}`, { 
+              method: 'DELETE' 
+          }).catch(console.error);
+      }
+      
       localAudio.srcObject = null;
       remoteAudio.srcObject = null;
       updateStatus('Call ended');
+      currentCallId = null;
   }
 </script>
 </body>
