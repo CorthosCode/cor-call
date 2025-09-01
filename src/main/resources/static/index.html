@@ -124,16 +124,15 @@
     const interval = setInterval(async () => {
         try {
             const response = await fetch(`${serverUrl}/api/signal/ice-candidates/${callId}`);
-            const candidates = await response.json();
+            const candidateData = await response.json();
 
-            for (const candidateData of candidates) {
-                try {
-                    // Преобразуем полученные данные в объект для addIceCandidate
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(candidateData));
-                } catch (error) {
-                    console.error('Error adding ICE candidate:', error);
-                }
+            try {
+                // Преобразуем полученные данные в объект для addIceCandidate
+                await peerConnection.addIceCandidate(new RTCIceCandidate(candidateData));
+            } catch (error) {
+                console.error('Error adding ICE candidate:', error);
             }
+
         } catch (error) {
             console.error('Error fetching ICE candidates:', error);
         }
