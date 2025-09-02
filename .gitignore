@@ -23,4 +23,8 @@
 hs_err_pid*
 replay_pid*
 
+# IDEs and editors
 .idea
+
+# Compiled files
+target

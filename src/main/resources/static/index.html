@@ -96,8 +96,9 @@
 
       // Собираем ICE-кандидаты и сразу отправляем
       peerConnection.onicecandidate = (event) => {
+          // Этот колбек вызывается КАЖДЫЙ РАЗ когда находится новый кандидат
           if (event.candidate) {
-              // Отправляем кандидат сразу при получении
+              // Отправляем КАЖДОГО кандидата сразу на сервер
               fetch(`${serverUrl}/api/signal/ice-candidate/${currentCallId}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
