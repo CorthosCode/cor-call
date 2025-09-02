@@ -65,18 +65,3 @@ public class SignalingService {
         System.out.println("CLEANUP for: " + callId);
     }
 }
-
-
-//        List<Map<String, Object>> candidates = iceCandidates.getOrDefault(callId, List.of());
-//
-//        // Очищаем кандидаты после получения (важно!)
-//        if (iceCandidates.containsKey(callId)) {
-//            iceCandidates.put(callId, List.of());
-//        }
-//
-//        System.out.println("GET ICE CANDIDATES for: " + callId + " -> " + candidates.size() + " candidates");
-//        return candidates;
-
-
-// Добавляем кандидат в список, а не перезаписываем!
-//        iceCandidates.computeIfAbsent(callId, k -> new CopyOnWriteArrayList<>()).add(candidate);

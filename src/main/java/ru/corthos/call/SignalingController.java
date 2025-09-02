@@ -47,7 +47,6 @@ public class SignalingController {
         signalingService.saveIceCandidate(callId, candidate);
     }
 
-    // Добавьте метод для очистки
     @DeleteMapping("/cleanup/{callId}")
     public void cleanup(@PathVariable String callId) {
         signalingService.clearCallData(callId);
